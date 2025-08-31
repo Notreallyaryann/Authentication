@@ -6,6 +6,11 @@ import {  z } from "zod";
 import jwt from 'jsonwebtoken'
 
 
+import { redisClient } from '../utils/redis.js';
+
+
+
+
 // 1. Define validation schema
 const registerSchema = z.object({
   name: z.string().min(2, "Name must be at least 2 characters long"),
@@ -214,15 +219,173 @@ const login = async (req, res) => {
   }
 };
 
+//getme
+const getMe = async (req, res) => {
+  try {
+    const user = await User.findById(req.user.id).select("-password");
+
+    if (!user) {
+      return res.status(404).json({
+        message: "User not found",
+        success: false,
+      });
+    }
+
+    return res.status(200).json({
+      user,
+      success: true,
+    });
+  } catch (error) {
+    return res.status(500).json({
+      message: "Failed to fetch user",
+      error: error.message,
+      success: false,
+    });
+  }
+};
+
+
+// Logout
+const logoutUser = async (req, res) => {
+    try {
+        const { token } = req.cookies;
+        if (!token) {
+            throw new Error("No token found");
+        }
+
+        const payload = jwt.decode(token);
+        if (!payload) {
+            throw new Error("Invalid token");
+        }
+
+       
+        const ttl = payload.exp - Math.floor(Date.now() / 1000);
+        if (ttl > 0) {
+            await redisClient.set(`token:${token}`, 'blocked', { EX: ttl });
+        }
+
+        // clear cookie
+        res.cookie('token', '', { expires: new Date(0) });
+        res.send("User Logged Out Successfully");
+    } catch (error) {
+        res.status(401).send("Error: " + error.message);
+    }
+}
+
+
+
+//forgot password
+const forgotPassword = async (req, res) => {
+  try {
+    const { email } = req.body;
+    if (!email) {
+      return res.status(400).json({
+        message: "Email is required",
+        success: false,
+      });
+    }
+
+    const user = await User.findOne({ email });
+    if (!user) {
+      return res.status(404).json({
+        message: "User not found",
+        success: false,
+      });
+    }
+
+    // Generate reset token
+    const resetToken = crypto.randomBytes(32).toString("hex");
+    user.resetPasswordToken = resetToken;
+    user.resetPasswordExpiry = Date.now() + 60 * 60 * 1000; // 1 hour expiry
+    await user.save();
+
+    // Send email
+    const transporter = nodemailer.createTransport({
+      service: "gmail",
+      auth: {
+        user: process.env.EMAIL_USER,
+        pass: process.env.EMAIL_PASS,
+      },
+    });
+
+    const mailOptions = {
+      from: `"Authentication" <${process.env.EMAIL_USER}>`,
+      to: user.email,
+      subject: "Reset your password",
+      text: `Click the link to reset your password: ${process.env.BASE_URL}/api/v1/users/reset/${resetToken}`,
+      html: `<p>Click <a href="${process.env.BASE_URL}/api/v1/users/reset/${resetToken}">here</a> to reset your password.</p>`,
+    };
+
+    await transporter.sendMail(mailOptions);
+
+    return res.status(200).json({
+      message: "Password reset email sent successfully",
+      success: true,
+    });
+  } catch (error) {
+    return res.status(500).json({
+      message: "Failed to send password reset email",
+      error: error.message,
+      success: false,
+    });
+  }
+};
+
+
+
+//reset pass
+const resetPassword = async (req, res) => {
+  try {
+    const { token } = req.params;
+    const { password } = req.body;
+
+    if (!password || password.length < 6) {
+      return res.status(400).json({
+        message: "Password must be at least 6 characters long",
+        success: false,
+      });
+    }
+
+    // Find user with valid reset token
+    const user = await User.findOne({
+      resetPasswordToken: token,
+      resetPasswordExpiry: { $gt: Date.now() },
+    });
+
+    if (!user) {
+      return res.status(400).json({
+        message: "Invalid or expired token",
+        success: false,
+      });
+    }
+
+    // Update password
+ user.password = password;    //hashing pre save hook is in schema
+
+    // Clear reset token and expiry
+    user.resetPasswordToken = undefined;
+    user.resetPasswordExpiry = undefined;
+
+    await user.save();
+
+    return res.status(200).json({
+      message: "Password reset successfully",
+      success: true,
+    });
+  } catch (error) {
+    return res.status(500).json({
+      message: "Failed to reset password",
+      error: error.message,
+      success: false,
+    });
+  }
+};
 
 
 
 
 
-
-
-
-export { registerUser, verifyUser ,login};
+export { registerUser, verifyUser ,login,getMe,logoutUser,forgotPassword,resetPassword};
 
 
 
